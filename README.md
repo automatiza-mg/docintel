@@ -10,7 +10,7 @@ lote. Projetado para ser compartilhado entre múltiplos projetos.
 go get github.com/automatiza-mg/docintel
 ```
 
-Requer Go 1.26 ou superior.
+Requer Go 1.25 ou superior.
 
 ## Uso
 
@@ -147,9 +147,13 @@ op, err := client.PollResult(ctx, location,
 ```
 
 Os padrões são intervalo de 2s para ambos, tempo limite de 5min em `PollResult` e
-30min em `PollBatchResult` (que processa múltiplos documentos). O deadline do
-`context.Context` também é respeitado — o que ocorrer primeiro encerra o polling,
-retornando `poller.ErrTimeout` no caso do tempo limite. O pacote
+30min em `PollBatchResult` (que processa múltiplos documentos). O tempo limite do
+polling retorna `poller.ErrTimeout`; o cancelamento (ou deadline) do
+`context.Context` informado encerra o polling com o erro do próprio contexto.
+
+Erros HTTP temporários (429, 500, 502, 503 e 504) são reconsultados
+automaticamente até o tempo limite; quando a resposta informa o header
+`Retry-After`, o intervalo até a próxima consulta respeita esse valor. O pacote
 `github.com/automatiza-mg/docintel/poller` é público e pode ser reutilizado de
 forma independente.
 
@@ -157,10 +161,15 @@ forma independente.
 
 - `ErrInvalidAnalyzeRequest`: parâmetros de análise de documento inválidos.
 - `ErrInvalidBatchRequest`: parâmetros de análise em lote inválidos.
-- `ErrOperationNotFound`: a operação consultada não existe mais.
-- `*AnalyzeError`: falha no processamento de um documento (carrega o `Status`).
+- `ErrOperationNotFound`: a operação consultada não existe mais (a Azure retém
+  os resultados por tempo limitado, tipicamente 24h).
+- `ErrMissingOperationLocation`: a análise foi aceita, mas a resposta não
+  contém o header `Operation-Location`.
+- `*AnalyzeError`: falha no processamento de um documento (carrega o `Status`
+  e o erro da Azure).
 - `*StatusError`: resposta HTTP com status inesperado; `Retryable()` indica se
-  a requisição pode ser repetida (429 e 5xx).
+  a requisição pode ser repetida (429, 500, 502, 503 e 504) e `RetryAfter`
+  carrega o valor do header `Retry-After`, quando informado.
 
 ## Licença
 

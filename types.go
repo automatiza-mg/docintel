@@ -53,12 +53,15 @@ const (
 	StatusCompleted Status = "completed"
 )
 
+// AnalyzeOperation representa o status de uma operação de análise de documento.
+//
+// AnalyzeResult é nil enquanto a operação não atinge [StatusSucceeded].
 type AnalyzeOperation struct {
-	Status              Status        `json:"status"`
-	CreatedDateTime     time.Time     `json:"createdDateTime"`
-	LastUpdatedDateTime time.Time     `json:"lastUpdatedDateTime"`
-	AnalyzeResult       AnalyzeResult `json:"analyzeResult"`
-	Error               *AzureError   `json:"error,omitempty"`
+	Status              Status         `json:"status"`
+	CreatedDateTime     time.Time      `json:"createdDateTime"`
+	LastUpdatedDateTime time.Time      `json:"lastUpdatedDateTime"`
+	AnalyzeResult       *AnalyzeResult `json:"analyzeResult,omitempty"`
+	Error               *AzureError    `json:"error,omitempty"`
 }
 
 // AnalyzeResult representa o resultado da análise de um documento.

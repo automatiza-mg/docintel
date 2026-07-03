@@ -87,6 +87,25 @@ func TestAnalyzeBatch_Accepted(t *testing.T) {
 	}
 }
 
+func TestAnalyzeBatch_MissingOperationLocation(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "secret-key")
+
+	_, err := client.AnalyzeBatch(t.Context(), AnalyzeBatchParams{
+		AzureBlobSource:    &AzureBlobSource{ContainerURL: "https://in?sas"},
+		ResultContainerURL: "https://out?sas",
+	})
+	if !errors.Is(err, ErrMissingOperationLocation) {
+		t.Fatalf("error = %v, want ErrMissingOperationLocation", err)
+	}
+}
+
 func TestAnalyzeBatch_Validation(t *testing.T) {
 	t.Parallel()
 
@@ -171,8 +190,8 @@ func TestAnalyzeBatch_UnexpectedStatus(t *testing.T) {
 	}
 
 	_, err := client.AnalyzeBatch(t.Context(), params)
-	statusErr, ok := errors.AsType[*StatusError](err)
-	if !ok {
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) {
 		t.Fatalf("error = %v, want *StatusError", err)
 	}
 	if statusErr.StatusCode != http.StatusBadRequest {
@@ -275,8 +294,8 @@ func TestGetBatchResult_UnexpectedStatus(t *testing.T) {
 	client := NewClient(srv.URL, "secret-key")
 
 	_, err := client.GetBatchResult(t.Context(), srv.URL)
-	statusErr, ok := errors.AsType[*StatusError](err)
-	if !ok {
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) {
 		t.Fatalf("error = %v, want *StatusError", err)
 	}
 	if statusErr.StatusCode != http.StatusInternalServerError {

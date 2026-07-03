@@ -43,7 +43,8 @@ func (p AnalyzeDocumentParams) validate() error {
 // Intelligence.
 //
 // Retorna o local da operação para ser consultado usando [Client.GetAnalyzeResult].
-// Retorna [ErrInvalidAnalyzeRequest] caso os parâmetros sejam inválidos.
+// Retorna [ErrInvalidAnalyzeRequest] caso os parâmetros sejam inválidos e
+// [ErrMissingOperationLocation] caso a resposta não informe a location.
 func (c *Client) AnalyzeDocument(ctx context.Context, params AnalyzeDocumentParams) (string, error) {
 	if err := params.validate(); err != nil {
 		return "", err
@@ -80,16 +81,15 @@ func (c *Client) AnalyzeDocument(ctx context.Context, params AnalyzeDocumentPara
 	}
 	defer res.Body.Close()
 
-	// Lê o corpo da requisição e retorna o erro caso status seja diferente de 202.
+	// Retorna o erro (com o corpo da resposta) caso status seja diferente de 202.
 	if res.StatusCode != http.StatusAccepted {
-		b, err := io.ReadAll(res.Body)
-		if err != nil {
-			return "", err
-		}
-		return "", &StatusError{StatusCode: res.StatusCode, Body: string(b)}
+		return "", newStatusError(res)
 	}
 
 	opLoc := res.Header.Get("Operation-Location")
+	if opLoc == "" {
+		return "", ErrMissingOperationLocation
+	}
 	return opLoc, nil
 }
 
@@ -119,8 +119,7 @@ func (c *Client) GetAnalyzeResult(ctx context.Context, location string) (*Analyz
 	case http.StatusNotFound:
 		return nil, ErrOperationNotFound
 	default:
-		b, _ := io.ReadAll(res.Body)
-		return nil, &StatusError{StatusCode: res.StatusCode, Body: string(b)}
+		return nil, newStatusError(res)
 	}
 }
 
@@ -130,16 +129,17 @@ func (c *Client) GetAnalyzeResult(ctx context.Context, location string) (*Analyz
 // O intervalo (padrão 2s) e o tempo máximo de espera (padrão 5min) são
 // configurados por [WithPollInterval] e [WithPollTimeout]; o deadline de ctx
 // também é respeitado. Erros HTTP temporários (ver [StatusError.Retryable]) são
-// reconsultados. Retorna [*AnalyzeError] caso a análise termine em falha e
-// [poller.ErrTimeout] caso o tempo limite seja atingido.
+// reconsultados, aguardando o header Retry-After quando informado. Retorna
+// [*AnalyzeError] caso a análise termine em falha e [poller.ErrTimeout] caso o
+// tempo limite seja atingido.
 func (c *Client) PollResult(ctx context.Context, location string, opts ...PollOption) (*AnalyzeOperation, error) {
 	cfg := newPollConfig(defaultPollTimeout, opts)
 	p := poller.New(cfg.interval, cfg.timeout, func(ctx context.Context) poller.Result[*AnalyzeOperation] {
 		op, err := c.GetAnalyzeResult(ctx, location)
 		if err != nil {
-			statusErr, ok := errors.AsType[*StatusError](err)
-			if ok && statusErr.Retryable() {
-				return poller.Result[*AnalyzeOperation]{Done: false}
+			var statusErr *StatusError
+			if errors.As(err, &statusErr) && statusErr.Retryable() {
+				return poller.Result[*AnalyzeOperation]{Done: false, Delay: statusErr.RetryAfter}
 			}
 			return poller.Result[*AnalyzeOperation]{Done: true, Err: err}
 		}

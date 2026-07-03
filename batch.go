@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -89,7 +88,8 @@ func (p AnalyzeBatchParams) validate() error {
 // gravados como arquivos no container de destino e não fazem parte da resposta.
 //
 // Retorna o local da operação para ser consultado usando [Client.GetBatchResult].
-// Retorna [ErrInvalidBatchRequest] caso os parâmetros sejam inválidos.
+// Retorna [ErrInvalidBatchRequest] caso os parâmetros sejam inválidos e
+// [ErrMissingOperationLocation] caso a resposta não informe a location.
 func (c *Client) AnalyzeBatch(ctx context.Context, params AnalyzeBatchParams) (string, error) {
 	if err := params.validate(); err != nil {
 		return "", err
@@ -131,16 +131,15 @@ func (c *Client) AnalyzeBatch(ctx context.Context, params AnalyzeBatchParams) (s
 	}
 	defer res.Body.Close()
 
-	// Lê o corpo da requisição e retorna o erro caso status seja diferente de 202.
+	// Retorna o erro (com o corpo da resposta) caso status seja diferente de 202.
 	if res.StatusCode != http.StatusAccepted {
-		b, err := io.ReadAll(res.Body)
-		if err != nil {
-			return "", err
-		}
-		return "", &StatusError{StatusCode: res.StatusCode, Body: string(b)}
+		return "", newStatusError(res)
 	}
 
 	operationLocation := res.Header.Get("Operation-Location")
+	if operationLocation == "" {
+		return "", ErrMissingOperationLocation
+	}
 	return operationLocation, nil
 }
 
@@ -170,8 +169,7 @@ func (c *Client) GetBatchResult(ctx context.Context, location string) (*BatchAna
 	case http.StatusNotFound:
 		return nil, ErrOperationNotFound
 	default:
-		b, _ := io.ReadAll(res.Body)
-		return nil, &StatusError{StatusCode: res.StatusCode, Body: string(b)}
+		return nil, newStatusError(res)
 	}
 }
 
@@ -181,16 +179,17 @@ func (c *Client) GetBatchResult(ctx context.Context, location string) (*BatchAna
 // O intervalo (padrão 2s) e o tempo máximo de espera (padrão 30min) são
 // configurados por [WithPollInterval] e [WithPollTimeout]; o deadline de ctx
 // também é respeitado. Erros HTTP temporários (ver [StatusError.Retryable]) são
-// reconsultados. Retorna [*AnalyzeError] caso a análise termine em falha e
-// [poller.ErrTimeout] caso o tempo limite seja atingido.
+// reconsultados, aguardando o header Retry-After quando informado. Retorna
+// [*AnalyzeError] caso a análise termine em falha e [poller.ErrTimeout] caso o
+// tempo limite seja atingido.
 func (c *Client) PollBatchResult(ctx context.Context, location string, opts ...PollOption) (*BatchAnalyzeOperation, error) {
 	cfg := newPollConfig(defaultBatchPollTimeout, opts)
 	p := poller.New(cfg.interval, cfg.timeout, func(ctx context.Context) poller.Result[*BatchAnalyzeOperation] {
 		op, err := c.GetBatchResult(ctx, location)
 		if err != nil {
-			statusErr, ok := errors.AsType[*StatusError](err)
-			if ok && statusErr.Retryable() {
-				return poller.Result[*BatchAnalyzeOperation]{Done: false}
+			var statusErr *StatusError
+			if errors.As(err, &statusErr) && statusErr.Retryable() {
+				return poller.Result[*BatchAnalyzeOperation]{Done: false, Delay: statusErr.RetryAfter}
 			}
 			return poller.Result[*BatchAnalyzeOperation]{Done: true, Err: err}
 		}

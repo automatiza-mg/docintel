@@ -128,11 +128,77 @@ func TestPoll_ParentContextCancelled(t *testing.T) {
 		}()
 
 		_, err := p.Poll(ctx)
-		if !errors.Is(err, ErrTimeout) {
-			t.Fatalf("expected ErrTimeout, got %v", err)
-		}
 		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("expected wrapped context.Canceled, got %v", err)
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+		if errors.Is(err, ErrTimeout) {
+			t.Fatalf("cancellation should not be reported as ErrTimeout, got %v", err)
+		}
+	})
+}
+
+func TestPoll_ParentDeadlineExceeded(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+		defer cancel()
+
+		p := New(testInterval, testTimeout, func(ctx context.Context) Result[int] {
+			return Result[int]{Done: false}
+		})
+
+		_, err := p.Poll(ctx)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected context.DeadlineExceeded, got %v", err)
+		}
+		if errors.Is(err, ErrTimeout) {
+			t.Fatalf("parent deadline should not be reported as ErrTimeout, got %v", err)
+		}
+	})
+}
+
+func TestPoll_DelayOverridesInterval(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const delay = 40 * time.Millisecond
+
+		var times []time.Time
+		p := New(testInterval, testTimeout, func(ctx context.Context) Result[int] {
+			times = append(times, time.Now())
+			if len(times) == 1 {
+				return Result[int]{Done: false, Delay: delay}
+			}
+			return Result[int]{Value: 1, Done: true}
+		})
+
+		_, err := p.Poll(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(times) != 2 {
+			t.Fatalf("expected fn to be called twice, got %d", len(times))
+		}
+		if got := times[1].Sub(times[0]); got != delay {
+			t.Fatalf("expected second call after %v, got %v", delay, got)
+		}
+	})
+}
+
+func TestPoll_DelayShorterThanIntervalIsIgnored(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var times []time.Time
+		p := New(testInterval, testTimeout, func(ctx context.Context) Result[int] {
+			times = append(times, time.Now())
+			if len(times) == 1 {
+				return Result[int]{Done: false, Delay: time.Millisecond}
+			}
+			return Result[int]{Value: 1, Done: true}
+		})
+
+		_, err := p.Poll(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := times[1].Sub(times[0]); got != testInterval {
+			t.Fatalf("expected second call after %v, got %v", testInterval, got)
 		}
 	})
 }

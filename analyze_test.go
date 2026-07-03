@@ -158,12 +158,31 @@ func TestAnalyzeDocument_UnexpectedStatus(t *testing.T) {
 		Document:    strings.NewReader("document-bytes"),
 		ContentType: "application/pdf",
 	})
-	statusErr, ok := errors.AsType[*StatusError](err)
-	if !ok {
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) {
 		t.Fatalf("error = %v, want *StatusError", err)
 	}
 	if statusErr.StatusCode != http.StatusBadRequest {
 		t.Fatalf("StatusCode = %d, want %d", statusErr.StatusCode, http.StatusBadRequest)
+	}
+}
+
+func TestAnalyzeDocument_MissingOperationLocation(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "secret-key")
+
+	_, err := client.AnalyzeDocument(t.Context(), AnalyzeDocumentParams{
+		Document:    strings.NewReader("document-bytes"),
+		ContentType: "application/pdf",
+	})
+	if !errors.Is(err, ErrMissingOperationLocation) {
+		t.Fatalf("error = %v, want ErrMissingOperationLocation", err)
 	}
 }
 
@@ -199,7 +218,7 @@ func TestGetAnalyzeResult_Succeeded(t *testing.T) {
 		t.Fatalf("Status = %q, want %q", op.Status, StatusSucceeded)
 	}
 
-	want := AnalyzeResult{
+	want := &AnalyzeResult{
 		APIVersion:    "2024-11-30",
 		ModelID:       "prebuilt-layout",
 		Content:       "# Título\n\nConteúdo extraído.",
@@ -230,6 +249,7 @@ func TestGetAnalyzeResult_UnexpectedStatus(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "7")
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
@@ -237,12 +257,15 @@ func TestGetAnalyzeResult_UnexpectedStatus(t *testing.T) {
 	client := NewClient(srv.URL, "secret-key")
 
 	_, err := client.GetAnalyzeResult(t.Context(), srv.URL)
-	statusErr, ok := errors.AsType[*StatusError](err)
-	if !ok {
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) {
 		t.Fatalf("error = %v, want *StatusError", err)
 	}
 	if statusErr.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("StatusCode = %d, want %d", statusErr.StatusCode, http.StatusInternalServerError)
+	}
+	if statusErr.RetryAfter != 7*time.Second {
+		t.Fatalf("RetryAfter = %v, want 7s", statusErr.RetryAfter)
 	}
 }
 
@@ -290,8 +313,8 @@ func TestPollResult_Failed(t *testing.T) {
 	client := NewClient(srv.URL, "secret-key")
 
 	_, err := client.PollResult(t.Context(), srv.URL, WithPollInterval(time.Millisecond))
-	analyzeErr, ok := errors.AsType[*AnalyzeError](err)
-	if !ok {
+	var analyzeErr *AnalyzeError
+	if !errors.As(err, &analyzeErr) {
 		t.Fatalf("error = %v, want *AnalyzeError", err)
 	}
 	if analyzeErr.Status != StatusFailed {

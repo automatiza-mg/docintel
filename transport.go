@@ -4,7 +4,8 @@ import "net/http"
 
 const apiKeyHeader = "Ocp-Apim-Subscription-Key"
 
-// Implementação de [http.RoundTripper] que adiciona o header com API key em toda requisição.
+// httpTransport é uma implementação de [http.RoundTripper] que adiciona o header
+// com API key em toda requisição.
 type httpTransport struct {
 	http.RoundTripper
 	apiKey string

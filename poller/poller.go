@@ -11,13 +11,17 @@ import (
 )
 
 // ErrTimeout é retornado quando o tempo limite é atingido antes da conclusão do polling.
-var ErrTimeout = errors.New("poller: operation timeout out")
+var ErrTimeout = errors.New("poller: operation timed out")
 
 type Result[T any] struct {
 	Value T
 	Err   error
 	// Done indica se o polling deve parar.
 	Done bool
+	// Delay indica o tempo mínimo de espera antes da próxima execução.
+	// Quando maior que o intervalo do [Poller], substitui o intervalo apenas
+	// na próxima espera. Ignorado quando Done é true.
+	Delay time.Duration
 }
 
 type Poller[T any] struct {
@@ -37,36 +41,39 @@ func New[T any](interval, timeout time.Duration, fn func(ctx context.Context) Re
 }
 
 // Poll executa a função repetidamente até que ela sinalize conclusão, retornando o valor produzido.
-// Retorna [ErrTimeout] caso o tempo limite seja atingido, ou o erro da própria função, se houver.
+//
+// Retorna [ErrTimeout] caso o tempo limite do [Poller] seja atingido, ou o erro
+// da própria função, se houver. Caso o ctx informado seja cancelado ou atinja o
+// próprio deadline, retorna o erro do ctx, sem envolvê-lo em [ErrTimeout].
 func (p *Poller[T]) Poll(ctx context.Context) (T, error) {
 	var zero T
 
-	ctx, cancel := context.WithTimeout(ctx, p.timeout)
+	ctx, cancel := context.WithTimeoutCause(ctx, p.timeout, ErrTimeout)
 	defer cancel()
 
-	ticker := time.NewTicker(p.interval)
-	defer ticker.Stop()
-
-	res := p.fn(ctx)
-	if res.Done {
-		if res.Err != nil {
-			return zero, res.Err
-		}
-		return res.Value, nil
-	}
+	timer := time.NewTimer(p.interval)
+	defer timer.Stop()
 
 	for {
+		res := p.fn(ctx)
+		if res.Done {
+			if res.Err != nil {
+				return zero, res.Err
+			}
+			return res.Value, nil
+		}
+
+		timer.Reset(max(p.interval, res.Delay))
+
 		select {
 		case <-ctx.Done():
-			return zero, fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
-		case <-ticker.C:
-			res := p.fn(ctx)
-			if res.Done {
-				if res.Err != nil {
-					return zero, res.Err
-				}
-				return res.Value, nil
+			if cause := context.Cause(ctx); errors.Is(cause, ErrTimeout) {
+				return zero, fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
 			}
+			// Cancelamento (ou deadline) do ctx informado pelo caller: não é um
+			// timeout do poller.
+			return zero, ctx.Err()
+		case <-timer.C:
 		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 )
@@ -280,5 +281,37 @@ func TestGetBatchResult_UnexpectedStatus(t *testing.T) {
 	}
 	if statusErr.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("StatusCode = %d, want %d", statusErr.StatusCode, http.StatusInternalServerError)
+	}
+}
+
+func TestPollBatchResult_CompletesAfterRunning(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusOK)
+		if calls < 2 {
+			io.WriteString(w, `{"status":"running","percentCompleted":50}`)
+			return
+		}
+		io.WriteString(w, `{"status":"completed","result":{"succeededCount":1}}`)
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "secret-key")
+
+	op, err := client.PollBatchResult(t.Context(), srv.URL, WithPollInterval(time.Millisecond))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if op.Status != StatusCompleted {
+		t.Fatalf("Status = %q, want %q", op.Status, StatusCompleted)
+	}
+	if op.Result.SucceededCount != 1 {
+		t.Fatalf("SucceededCount = %d, want 1", op.Result.SucceededCount)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
 	}
 }

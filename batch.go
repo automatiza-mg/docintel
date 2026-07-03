@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/automatiza-mg/docintel/poller"
 )
 
 // AzureBlobSource especifica um container (opcionalmente filtrado por prefixo) cujos
@@ -170,4 +173,39 @@ func (c *Client) GetBatchResult(ctx context.Context, location string) (*BatchAna
 		b, _ := io.ReadAll(res.Body)
 		return nil, &StatusError{StatusCode: res.StatusCode, Body: string(b)}
 	}
+}
+
+// PollBatchResult consulta a operação em lote repetidamente até que ela atinja um
+// status terminal, retornando o resultado da análise.
+//
+// O intervalo (padrão 2s) e o tempo máximo de espera (padrão 30min) são
+// configurados por [WithPollInterval] e [WithPollTimeout]; o deadline de ctx
+// também é respeitado. Erros HTTP temporários (ver [StatusError.Retryable]) são
+// reconsultados. Retorna [*AnalyzeError] caso a análise termine em falha e
+// [poller.ErrTimeout] caso o tempo limite seja atingido.
+func (c *Client) PollBatchResult(ctx context.Context, location string, opts ...PollOption) (*BatchAnalyzeOperation, error) {
+	cfg := newPollConfig(defaultBatchPollTimeout, opts)
+	p := poller.New(cfg.interval, cfg.timeout, func(ctx context.Context) poller.Result[*BatchAnalyzeOperation] {
+		op, err := c.GetBatchResult(ctx, location)
+		if err != nil {
+			statusErr, ok := errors.AsType[*StatusError](err)
+			if ok && statusErr.Retryable() {
+				return poller.Result[*BatchAnalyzeOperation]{Done: false}
+			}
+			return poller.Result[*BatchAnalyzeOperation]{Done: true, Err: err}
+		}
+
+		switch op.Status {
+		case StatusCompleted, StatusSucceeded:
+			return poller.Result[*BatchAnalyzeOperation]{Done: true, Value: op}
+		case StatusFailed, StatusCanceled, StatusSkipped:
+			return poller.Result[*BatchAnalyzeOperation]{Done: true, Err: &AnalyzeError{Status: op.Status, Err: op.Error}}
+		case StatusRunning, StatusNotStarted:
+			return poller.Result[*BatchAnalyzeOperation]{Done: false}
+		default:
+			return poller.Result[*BatchAnalyzeOperation]{Done: true, Err: fmt.Errorf("unexpected status: %s", op.Status)}
+		}
+	})
+
+	return p.Poll(ctx)
 }

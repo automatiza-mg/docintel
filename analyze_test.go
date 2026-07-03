@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 )
@@ -242,5 +243,84 @@ func TestGetAnalyzeResult_UnexpectedStatus(t *testing.T) {
 	}
 	if statusErr.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("StatusCode = %d, want %d", statusErr.StatusCode, http.StatusInternalServerError)
+	}
+}
+
+func TestPollResult_SucceedsAfterRunning(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusOK)
+		if calls < 3 {
+			io.WriteString(w, `{"status":"running"}`)
+			return
+		}
+		io.WriteString(w, `{"status":"succeeded","analyzeResult":{"content":"# Título"}}`)
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "secret-key")
+
+	op, err := client.PollResult(t.Context(), srv.URL, WithPollInterval(time.Millisecond))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if op.Status != StatusSucceeded {
+		t.Fatalf("Status = %q, want %q", op.Status, StatusSucceeded)
+	}
+	if op.AnalyzeResult.Content != "# Título" {
+		t.Fatalf("Content = %q, want %q", op.AnalyzeResult.Content, "# Título")
+	}
+	if calls != 3 {
+		t.Fatalf("calls = %d, want 3", calls)
+	}
+}
+
+func TestPollResult_Failed(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"status":"failed","error":{"code":"InvalidArgument","message":"bad"}}`)
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "secret-key")
+
+	_, err := client.PollResult(t.Context(), srv.URL, WithPollInterval(time.Millisecond))
+	analyzeErr, ok := errors.AsType[*AnalyzeError](err)
+	if !ok {
+		t.Fatalf("error = %v, want *AnalyzeError", err)
+	}
+	if analyzeErr.Status != StatusFailed {
+		t.Fatalf("Status = %q, want %q", analyzeErr.Status, StatusFailed)
+	}
+}
+
+func TestPollResult_RetriesRetryableStatus(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"status":"succeeded","analyzeResult":{"content":"ok"}}`)
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "secret-key")
+
+	op, err := client.PollResult(t.Context(), srv.URL, WithPollInterval(time.Millisecond))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if op.AnalyzeResult.Content != "ok" {
+		t.Fatalf("Content = %q, want %q", op.AnalyzeResult.Content, "ok")
 	}
 }

@@ -17,7 +17,9 @@ Requer Go 1.26 ou superior.
 ### Análise de um documento
 
 A análise é assíncrona: `AnalyzeDocument` retorna a location da operação, que
-deve ser consultada com `GetAnalyzeResult` até atingir um status terminal.
+deve ser consultada até atingir um status terminal. Use `PollResult` para
+aguardar a conclusão automaticamente, ou `GetAnalyzeResult` para consultar o
+status uma única vez.
 
 ```go
 package main
@@ -55,22 +57,13 @@ func main() {
         panic(err)
     }
 
-    // Consulte a operação até que ela seja concluída (polling a cargo do chamador).
-    for {
-        op, err := client.GetAnalyzeResult(ctx, location)
-        if err != nil {
-            panic(err)
-        }
-
-        switch op.Status {
-        case docintel.StatusSucceeded:
-            fmt.Println(op.AnalyzeResult.Content)
-            return
-        case docintel.StatusFailed, docintel.StatusCanceled, docintel.StatusSkipped:
-            panic(&docintel.AnalyzeError{Status: op.Status, Err: op.Error})
-        }
-        // StatusRunning / StatusNotStarted: aguarde e tente novamente.
+    // Aguarda a conclusão, consultando em intervalos regulares (ver Configuração).
+    op, err := client.PollResult(ctx, location)
+    if err != nil {
+        panic(err)
     }
+
+    fmt.Println(op.AnalyzeResult.Content)
 }
 ```
 
@@ -94,8 +87,17 @@ location, err := client.AnalyzeBatch(ctx, docintel.AnalyzeBatchParams{
 })
 ```
 
-Consulte o resultado com `GetBatchResult`. Os resultados de cada documento são
-gravados no container de destino, e não retornados na resposta.
+Aguarde o resultado com `PollBatchResult` (ou consulte uma vez com
+`GetBatchResult`). Os resultados de cada documento são gravados no container de
+destino, e não retornados na resposta:
+
+```go
+op, err := client.PollBatchResult(ctx, location)
+if err != nil {
+    panic(err)
+}
+fmt.Printf("%d succeeded, %d failed\n", op.Result.SucceededCount, op.Result.FailedCount)
+```
 
 ## Configuração
 
@@ -130,6 +132,26 @@ client := docintel.NewClient(endpoint, key,
 Por padrão o client autentica com a API key (header
 `Ocp-Apim-Subscription-Key`). Para usar autenticação via Azure AD, injete um
 `*http.Client` com um `http.RoundTripper` próprio usando `WithHTTPClient`.
+
+### Polling
+
+`PollResult` e `PollBatchResult` consultam a operação em intervalos regulares até
+um status terminal ou até o tempo limite. O intervalo e o tempo limite são
+configurados por chamada, via `WithPollInterval` e `WithPollTimeout`:
+
+```go
+op, err := client.PollResult(ctx, location,
+    docintel.WithPollInterval(5*time.Second),
+    docintel.WithPollTimeout(10*time.Minute),
+)
+```
+
+Os padrões são intervalo de 2s para ambos, tempo limite de 5min em `PollResult` e
+30min em `PollBatchResult` (que processa múltiplos documentos). O deadline do
+`context.Context` também é respeitado — o que ocorrer primeiro encerra o polling,
+retornando `poller.ErrTimeout` no caso do tempo limite. O pacote
+`github.com/automatiza-mg/docintel/poller` é público e pode ser reutilizado de
+forma independente.
 
 ## Erros
 

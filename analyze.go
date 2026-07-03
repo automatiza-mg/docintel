@@ -3,11 +3,14 @@ package docintel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/automatiza-mg/docintel/poller"
 )
 
 // AnalyzeDocumentParams agrupa os parâmetros para analisar um documento individual.
@@ -119,4 +122,39 @@ func (c *Client) GetAnalyzeResult(ctx context.Context, location string) (*Analyz
 		b, _ := io.ReadAll(res.Body)
 		return nil, &StatusError{StatusCode: res.StatusCode, Body: string(b)}
 	}
+}
+
+// PollResult consulta a operação repetidamente até que ela atinja um status
+// terminal, retornando o resultado da análise.
+//
+// O intervalo (padrão 2s) e o tempo máximo de espera (padrão 5min) são
+// configurados por [WithPollInterval] e [WithPollTimeout]; o deadline de ctx
+// também é respeitado. Erros HTTP temporários (ver [StatusError.Retryable]) são
+// reconsultados. Retorna [*AnalyzeError] caso a análise termine em falha e
+// [poller.ErrTimeout] caso o tempo limite seja atingido.
+func (c *Client) PollResult(ctx context.Context, location string, opts ...PollOption) (*AnalyzeOperation, error) {
+	cfg := newPollConfig(defaultPollTimeout, opts)
+	p := poller.New(cfg.interval, cfg.timeout, func(ctx context.Context) poller.Result[*AnalyzeOperation] {
+		op, err := c.GetAnalyzeResult(ctx, location)
+		if err != nil {
+			statusErr, ok := errors.AsType[*StatusError](err)
+			if ok && statusErr.Retryable() {
+				return poller.Result[*AnalyzeOperation]{Done: false}
+			}
+			return poller.Result[*AnalyzeOperation]{Done: true, Err: err}
+		}
+
+		switch op.Status {
+		case StatusSucceeded:
+			return poller.Result[*AnalyzeOperation]{Done: true, Value: op}
+		case StatusFailed, StatusCanceled, StatusSkipped:
+			return poller.Result[*AnalyzeOperation]{Done: true, Err: &AnalyzeError{Status: op.Status, Err: op.Error}}
+		case StatusRunning, StatusNotStarted:
+			return poller.Result[*AnalyzeOperation]{Done: false}
+		default:
+			return poller.Result[*AnalyzeOperation]{Done: true, Err: fmt.Errorf("unexpected status: %s", op.Status)}
+		}
+	})
+
+	return p.Poll(ctx)
 }
